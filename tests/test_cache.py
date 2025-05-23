@@ -1,7 +1,8 @@
 import asyncio
-import pytest
 import time
-from unittest.mock import AsyncMock
+
+import pytest
+
 from async_lru_cache import alru_cache
 
 
