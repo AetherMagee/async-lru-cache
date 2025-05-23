@@ -2,6 +2,8 @@
 
 A high-performance, fully asynchronous LRU (Least Recently Used) cache decorator for Python async functions. Built specifically for asyncio applications with comprehensive caching features.
 
+⚠️ AI slop warning
+
 [![Python 3.9+](https://img.shields.io/badge/python-3.9-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
