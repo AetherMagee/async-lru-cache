@@ -1,6 +1,5 @@
 import asyncio
 import functools
-import hashlib
 import inspect
 import sys
 import time
@@ -56,8 +55,43 @@ class AsyncLRUCache:
         # Track ongoing computations to prevent duplicate work
         self._pending: Dict[str, asyncio.Future] = {}
 
+    def _make_hashable(self, obj: Any) -> Any:
+        """Convert unhashable types to hashable equivalents."""
+        if isinstance(obj, (str, int, float, bool, type(None), bytes)):
+            return obj
+        elif isinstance(obj, (list, tuple)):
+            return tuple(self._make_hashable(item) for item in obj)
+        elif isinstance(obj, dict):
+            return tuple(sorted((k, self._make_hashable(v)) for k, v in obj.items()))
+        elif isinstance(obj, set):
+            return tuple(sorted(self._make_hashable(item) for item in obj))
+        elif isinstance(obj, frozenset):
+            return frozenset(self._make_hashable(item) for item in obj)
+        else:
+            # For complex objects (dataclasses, pydantic, etc)
+            # Try common patterns first
+
+            # Check if it's already hashable
+            try:
+                hash(obj)
+                return obj
+            except TypeError:
+                pass
+
+            # Try __dict__ for dataclasses/pydantic models
+            if hasattr(obj, "__dict__"):
+                return (obj.__class__.__name__, self._make_hashable(obj.__dict__))
+
+            # Try __slots__
+            if hasattr(obj, "__slots__"):
+                slot_values = tuple((slot, self._make_hashable(getattr(obj, slot, None))) for slot in obj.__slots__ if hasattr(obj, slot))
+                return (obj.__class__.__name__, slot_values)
+
+            # Last resort: use repr (but this is slow and might not be stable)
+            return repr(obj)
+
     def _get_cache_key(self, func: Callable, args: tuple, kwargs: dict) -> str:
-        """Generate cache key from function arguments, respecting ignore_params."""
+        """Generate cache key from function arguments efficiently."""
         sig = inspect.signature(func)
         bound_args = sig.bind(*args, **kwargs)
         bound_args.apply_defaults()
@@ -65,9 +99,30 @@ class AsyncLRUCache:
         # Filter out ignored parameters
         filtered_args = {name: value for name, value in bound_args.arguments.items() if name not in self.ignore_params}
 
-        # Create a deterministic string representation
-        key_data = f"{func.__module__}.{func.__qualname__}:{repr(sorted(filtered_args.items()))}"
-        return hashlib.sha256(key_data.encode()).hexdigest()
+        # Build hashable key components
+        key_parts = [
+            func.__module__,
+            func.__qualname__,
+        ]
+
+        # Convert args to hashable format
+        for name in sorted(filtered_args.keys()):
+            value = filtered_args[name]
+            hashable_value = self._make_hashable(value)
+            key_parts.append((name, hashable_value))
+
+        # Try to use Python's hash directly (fast path)
+        try:
+            # Use a fixed string prefix to avoid collisions with other uses of hash()
+            cache_key = f"alru:{hash(tuple(key_parts))}"
+            return cache_key
+        except TypeError:
+            # Fallback for unhashable types that slipped through
+            # Use repr as last resort, but don't hash it with SHA
+            key_str = "|".join(f"{part}" if isinstance(part, str) else repr(part) for part in key_parts)
+            # Use Python's hash with the string - much faster than SHA256
+            # Add length to reduce collision probability
+            return f"alru:{len(key_str)}:{hash(key_str)}"
 
     def _format_bytes(self, bytes_size: int) -> str:
         """Format bytes into human-readable string."""
