@@ -22,8 +22,10 @@ classifiers = [
 ]
 keywords = ["async", "cache", "lru", "decorator", "asyncio"]
 
-[project.scripts]
-async-lru-cache = "async_lru_cache:main"
+[project.urls]
+Homepage = "https://github.com/AetherMagee/async-lru-cache"
+Repository = "https://github.com/AetherMagee/async-lru-cache.git"
+Issues = "https://github.com/AetherMagee/async-lru-cache/issues"
 
 [build-system]
 requires = ["hatchling"]
