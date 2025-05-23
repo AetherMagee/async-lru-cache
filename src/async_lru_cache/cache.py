@@ -211,52 +211,63 @@ class AsyncLRUCacheWrapper:
         functools.update_wrapper(self, func)
 
     async def __call__(self, *args, **kwargs) -> Any:
-        """Call the cached function with deduplication for concurrent calls."""
+        """Call the cached function with proper deduplication for concurrent calls."""
         cache_key = self._cache._get_cache_key(self._func, args, kwargs)
 
-        # Try to get from cache
+        # First check without holding the lock for performance
         cached_result = await self._cache.get(cache_key)
         if cached_result is not _MISSING:
             return cached_result
 
-        # Check if there's already a pending computation for this key
+        # Need to handle concurrent calls properly
+        async with self._cache._lock:
+            # Double-check after acquiring lock
+            if cache_key in self._cache.cache:
+                entry = self._cache.cache[cache_key]
+                if not entry.is_expired(self._cache.ttl):
+                    self._cache.cache.move_to_end(cache_key)
+                    entry.access_count += 1
+                    self._cache.hits += 1
+                    return entry.value
+
+            # Check if computation is already in progress
+            if cache_key in self._cache._pending:
+                future = self._cache._pending[cache_key]
+
+        # Wait outside the lock if computation is in progress
         if cache_key in self._cache._pending:
-            # Wait for the ongoing computation
-            future = self._cache._pending[cache_key]
             try:
                 return await future
             except Exception:
-                # If the pending computation failed, we'll let this call fail too
                 raise
 
-        # Create a future for this computation
+        # Create future for this computation
         future = asyncio.Future()
-        self._cache._pending[cache_key] = future
+        async with self._cache._lock:
+            # Final check before starting computation
+            if cache_key not in self._cache._pending:
+                self._cache._pending[cache_key] = future
+            else:
+                # Someone else started computation while we were waiting
+                future = self._cache._pending[cache_key]
+
+        # If we're not the one computing, wait for result
+        if future != self._cache._pending.get(cache_key):
+            return await future
 
         try:
-            # Call original function
             result = await self._func(*args, **kwargs)
-
-            # Store in cache only if successful
             await self._cache.set(cache_key, result)
-
-            # Set the future result
             if not future.done():
                 future.set_result(result)
-
             return result
         except Exception as e:
-            # Set the future exception only if someone is waiting
             if not future.done():
                 future.set_exception(e)
             raise
         finally:
-            # Remove from pending
-            self._cache._pending.pop(cache_key, None)
-
-            # Cancel the future if it wasn't used
-            if not future.done():
-                future.cancel()
+            async with self._cache._lock:
+                self._cache._pending.pop(cache_key, None)
 
     async def get_cache_stats(self) -> CacheStats:
         """Get cache statistics."""
