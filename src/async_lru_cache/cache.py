@@ -69,14 +69,6 @@ class AsyncLRUCache:
         key_data = f"{func.__module__}.{func.__qualname__}:{repr(sorted(filtered_args.items()))}"
         return hashlib.sha256(key_data.encode()).hexdigest()
 
-    def _estimate_size(self, obj: Any) -> int:
-        """Estimate memory size of an object."""
-        try:
-            return sys.getsizeof(obj)
-        except (TypeError, AttributeError):
-            # Fallback for objects that don't support getsizeof
-            return len(str(obj)) * 2  # Rough estimate
-
     def _format_bytes(self, bytes_size: int) -> str:
         """Format bytes into human-readable string."""
         for unit in ["B", "KB", "MB", "GB"]:
@@ -128,12 +120,56 @@ class AsyncLRUCache:
         for key in expired_keys:
             del self.cache[key]
 
+    def _deep_getsizeof(self, obj: Any, seen: Optional[set] = None) -> int:
+        """Calculate deep size of an object including all referenced objects."""
+        size = sys.getsizeof(obj)
+
+        if seen is None:
+            seen = set()
+
+        obj_id = id(obj)
+        if obj_id in seen:
+            return 0  # Avoid counting the same object twice
+
+        seen.add(obj_id)
+
+        if isinstance(obj, dict):
+            size += sum(self._deep_getsizeof(k, seen) + self._deep_getsizeof(v, seen) for k, v in obj.items())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            size += sum(self._deep_getsizeof(item, seen) for item in obj)
+        elif hasattr(obj, "__dict__"):
+            size += self._deep_getsizeof(obj.__dict__, seen)
+        elif hasattr(obj, "__slots__"):
+            size += sum(self._deep_getsizeof(getattr(obj, slot, None), seen) for slot in obj.__slots__ if hasattr(obj, slot))
+
+        return size
+
     async def get_cache_stats(self) -> CacheStats:
         """Get cache statistics."""
         async with self._lock:
             await self._cleanup_expired()
 
-            total_bytes = sum(self._estimate_size(entry.value) + self._estimate_size(key) for key, entry in self.cache.items())
+            total_bytes = 0
+
+            # Calculate size of cache entries
+            for key, entry in self.cache.items():
+                # Size of the key
+                total_bytes += sys.getsizeof(key)
+                # Size of the CacheEntry object
+                total_bytes += sys.getsizeof(entry)
+                # Deep size of the cached value
+                total_bytes += self._deep_getsizeof(entry.value)
+                # Size of timestamp and access_count
+                total_bytes += sys.getsizeof(entry.timestamp)
+                total_bytes += sys.getsizeof(entry.access_count)
+
+            # OrderedDict overhead (approximate)
+            total_bytes += sys.getsizeof(self.cache)
+
+            # Pending futures
+            total_bytes += sys.getsizeof(self._pending)
+            for k, v in self._pending.items():
+                total_bytes += sys.getsizeof(k) + sys.getsizeof(v)
 
             return CacheStats(
                 current_size=len(self.cache),
